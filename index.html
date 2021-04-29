@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<title>My first three.js app</title>
+		<style>
+			body { margin: 0; }
+		</style>
+	</head>
+	<body>
+		<script src="js/three.js"></script>
+		<script src="js/threex.atmospherematerial.js"></script>
+		<script src="js/threex.dialategeometry.js"></script>
+		<script id="vertShader" type="shader-code">
+			varying vec2 vUv;
+		
+		  void main() {
+			vUv = uv;
+			gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
+		  }
+		</script>
+		
+		<script id="fragShader" type="shader-code">
+			uniform sampler2D tOld;
+		  uniform sampler2D tNew;
+		
+		  varying vec2 vUv;
+		
+		  // from http://theorangeduck.com/page/avoiding-shader-conditionals
+		  float when_gt(float x, float y) {
+			return max(sign(x - y), 0.0);
+		  }
+		
+		  void main() {
+			vec4 texelOld = texture2D(tOld, vUv);
+			vec4 texelNew = texture2D(tNew, vUv);
+			texelOld *= 0.96;//0.96;
+		
+			// the expressions bellow are equivalent to
+			// if (texelOld.a < 0.2) texelOld.a = 0.0;
+			texelOld.r *= when_gt(texelOld.r, 0.2);
+			texelOld.g *= when_gt(texelOld.g, 0.2);
+			texelOld.b *= when_gt(texelOld.b, 0.2);
+			texelOld.a *= when_gt(texelOld.a, 0.2);
+		
+			gl_FragColor = texelOld + texelNew;
+		  }
+		</script>
+
+
+		<script>
+
+			// TODO: https://discoverthreejs.com/tips-and-tricks/#:~:text=Use%20as%20few%20transparent%20objects,with%20basic%20material%20using%20scene.
+			const NUMBER_OF_STARS = 1000; // how many stars there are in the scene
+			const STAR_SIZE = 0.001; // size of the inner star
+			const GLOW_SIZE = 0.005; // by how much the glow mesh is dilated
+			const STAR_COLORS = [0xffff00, 0xFFFFFF, 0x7FFFD4]; // yellow 0xffff00, white 0xFFFFFF, blue 0x7FFFD4
+			const INSIDE_GLOW_COEFICIENT = 0.6; // see http://jeromeetienne.github.io/threex.geometricglow/examples/geometricglowmesh.html
+			const INSIDE_GLOW_POWER = 2.1;
+			const OUTSIDE_GLOW_COEFICIENT = 0.0001;
+			const OUTSIDE_GLOW_POWER = 2;
+
+			const CAMERA_CUTOFF_DISTANCE = 0.2; // when objects become not visible anymore
+			const CAMERA_SPEED = 0.004; // speed of camera movement
+			const CAMERA_DIRECTION = new THREE.Vector3; // direction of camera movement
+			const SCENE_SIZE = 10;
+			const SCENE_START_COORDINATE = -5;
+			const INITIAL_CAMERA_Z = SCENE_START_COORDINATE + SCENE_SIZE;
+
+			var sceneMain, sceneComp, sceneScreen;
+			var cameraPerspective, cameraOrtho;
+			var renderer;
+			var textureOld, textureNew, textureComp;
+
+			// Adds random stars to the main scene
+			const generateStars = function() {
+
+				for (var i = 0; i < NUMBER_OF_STARS; i++) {
+					var geometry = new THREE.SphereGeometry(); 
+					geometry.applyMatrix( new THREE.Matrix4().makeScale(STAR_SIZE, STAR_SIZE, STAR_SIZE) ); 
+					geometry.applyMatrix( new THREE.Matrix4().makeTranslation(Math.random()*SCENE_SIZE+SCENE_START_COORDINATE, Math.random()*SCENE_SIZE+SCENE_START_COORDINATE, Math.random()*SCENE_SIZE+SCENE_START_COORDINATE) ); 
+					var currentStarColor = STAR_COLORS[Math.floor(Math.random()*STAR_COLORS.length)];
+					var material = new THREE.MeshBasicMaterial( {color: currentStarColor});
+					var sphere = new THREE.Mesh( geometry, material );
+					sceneMain.add( sphere );
+
+					// create a glow mesh: https://github.com/jeromeetienne/threex.geometricglow/blob/master/examples/geometricglowmesh.html
+	
+					var glowObject3d	= new THREE.Object3D;
+
+					var insideGlowGeometry	= sphere.geometry.clone()
+					THREEx.dilateGeometry(insideGlowGeometry, GLOW_SIZE);
+					var insideGlowMaterial	= THREEx.createAtmosphereMaterial();
+					insideGlowMaterial.uniforms.glowColor.value	= new THREE.Color(currentStarColor);
+					insideGlowMaterial.uniforms.coeficient.value	= INSIDE_GLOW_COEFICIENT;
+					insideGlowMaterial.uniforms.power.value		= INSIDE_GLOW_POWER; 
+					var insideMesh	= new THREE.Mesh(insideGlowGeometry, insideGlowMaterial );
+					glowObject3d.add( insideMesh );
+					
+					var outsideGlowGeometry = sphere.geometry.clone();
+					THREEx.dilateGeometry(outsideGlowGeometry, GLOW_SIZE);
+					var outsideGlowMaterial = THREEx.createAtmosphereMaterial();
+					outsideGlowMaterial.uniforms.glowColor.value = new THREE.Color(currentStarColor);
+					outsideGlowMaterial.uniforms.coeficient.value = OUTSIDE_GLOW_COEFICIENT;
+					outsideGlowMaterial.uniforms.power.value = OUTSIDE_GLOW_POWER;
+					var outsideMesh = new THREE.Mesh(outsideGlowGeometry, outsideGlowMaterial);
+					glowObject3d.add(outsideMesh);
+
+					sphere.add(glowObject3d);
+
+				}
+			};
+			
+			// Changes the z coordinate of stars if they are no longer visible:
+			const updateStars = function() {
+				var stars = sceneMain.children;
+				for (var i=0; i < stars.length; i++) {
+					if (stars[i].geometry.vertices[0].z > cameraPerspective.position.z-CAMERA_CUTOFF_DISTANCE) { 
+						// it is enough to look only at the first vertex because we do not need high precision
+						stars[i].geometry.applyMatrix(new THREE.Matrix4().makeTranslation(0, 0, -10));
+						// move the glow of the star too:
+						var insideGlowGeometry = stars[i].children[0].children[0].geometry;
+						var outsideGlowGeometry = stars[i].children[0].children[1].geometry;
+						insideGlowGeometry.applyMatrix(new THREE.Matrix4().makeTranslation(0, 0, -1*SCENE_SIZE));
+						outsideGlowGeometry.applyMatrix(new THREE.Matrix4().makeTranslation(0, 0, -1*SCENE_SIZE));
+					}
+				}
+			};
+
+			function init() {
+				// main scene:
+				sceneMain = new THREE.Scene();
+				cameraPerspective = new THREE.PerspectiveCamera( 75, window.innerWidth / window.innerHeight, 0.01, 1000 );
+				renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+				renderer.setPixelRatio( window.devicePixelRatio );
+				renderer.setSize( window.innerWidth, window.innerHeight );
+				document.body.appendChild( renderer.domElement );
+
+				// other scenes for motion trails: https://codepen.io/brunoimbrizi/pen/MoRJaN
+				sceneComp = new THREE.Scene();
+  				sceneScreen = new THREE.Scene();
+				cameraOrtho = new THREE.OrthographicCamera(window.innerWidth / - 2, window.innerWidth / 2, window.innerHeight / 2, window.innerHeight / - 2, -10000, 10000);
+				cameraOrtho.position.z = 0;
+				  
+				// render targets
+  				textureOld = new THREE.WebGLRenderTarget(window.innerWidth, window.innerHeight, { minFilter: THREE.LinearFilter, magFilter: THREE.NearestFilter, format: THREE.RGBAFormat });
+  				textureNew = new THREE.WebGLRenderTarget(window.innerWidth, window.innerHeight, { minFilter: THREE.LinearFilter, magFilter: THREE.NearestFilter, format: THREE.RGBAFormat });
+  				textureComp = new THREE.WebGLRenderTarget(window.innerWidth, window.innerHeight, { minFilter: THREE.LinearFilter, magFilter: THREE.NearestFilter, format: THREE.RGBAFormat });
+
+				// stars and camera movement:
+				generateStars();
+				cameraPerspective.position.z = INITIAL_CAMERA_Z;
+
+				initQuads();
+			};
+
+			// Initializes additional objects for the motion trails:
+			function initQuads() {
+  				var geometry = new THREE.PlaneBufferGeometry(window.innerWidth, window.innerHeight);
+  
+  				var material = new THREE.ShaderMaterial({
+    				uniforms: {
+      					tOld: { value: textureOld.texture },
+      					tNew: { value: textureNew.texture },
+    				},
+    				vertexShader: document.getElementById('vertShader').innerHTML,
+    				fragmentShader: document.getElementById('fragShader').innerHTML,
+  				});
+
+  				var quadComp = new THREE.Mesh(geometry, material);
+  				sceneComp.add(quadComp);
+
+  				material = new THREE.MeshBasicMaterial({ map: textureComp.texture });
+  				var quadScreen = new THREE.Mesh(geometry, material);
+  				sceneScreen.add(quadScreen);
+			};
+
+
+			const animate = function () {
+
+					updateStars(sceneMain, cameraPerspective);
+
+					cameraPerspective.getWorldDirection(CAMERA_DIRECTION);
+					cameraPerspective.position.addScaledVector(CAMERA_DIRECTION, CAMERA_SPEED);
+					//renderer.render(sceneMain, cameraPerspective);
+
+					renderer.setRenderTarget(textureNew);
+					renderer.render(sceneMain, cameraPerspective);
+					renderer.setRenderTarget(textureComp);
+					renderer.render(sceneComp, cameraOrtho);
+					renderer.setRenderTarget(textureOld);
+					renderer.render(sceneScreen, cameraOrtho);
+					renderer.setRenderTarget(null); 
+					renderer.render(sceneScreen, cameraOrtho);
+
+    				requestAnimationFrame(animate);
+			};
+
+			init();
+			animate();
+		</script>
+	</body>
+</html>
